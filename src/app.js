@@ -1,13 +1,14 @@
-// src/app.js
-const AWS = require("aws-sdk");
+// app.js (Node.js 20.x, AWS SDK v3 - CommonJS)
+
+const { TextractClient, DetectDocumentTextCommand } = require("@aws-sdk/client-textract");
+const { DynamoDBClient, PutItemCommand } = require("@aws-sdk/client-dynamodb");
 const { randomUUID } = require("crypto");
 
-const textract = new AWS.Textract();
-const dynamodb = new AWS.DynamoDB();
-
+const textract = new TextractClient({});
+const dynamodb = new DynamoDBClient({});
 const TABLE_NAME = process.env.TABLE_NAME;
 
-// --------- Helpers for parsing text ---------
+// -------------- Helper functions for parsing text -----------------
 
 function extractEmail(text) {
   const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -15,7 +16,7 @@ function extractEmail(text) {
 }
 
 function extractPhone(text) {
-  // Very simple phone regex; adjust as per your CV format
+  // Very simple phone regex; tune for your formats
   const match = text.match(/(\+?\d[\d\s\-]{8,15})/);
   return match ? match[0] : null;
 }
@@ -23,8 +24,8 @@ function extractPhone(text) {
 function extractName(text) {
   const lines = text
     .split(/\r?\n/)
-    .map(l => l.trim())
-    .filter(l => l.length > 0);
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
   for (const line of lines.slice(0, 8)) {
     const lower = line.toLowerCase();
@@ -70,19 +71,19 @@ function extractSkills(text) {
   return Array.from(found).sort();
 }
 
-// --------- Textract call ---------
+// -------------- Textract integration -----------------
 
 async function extractTextFromS3(bucket, key) {
-  const params = {
+  const cmd = new DetectDocumentTextCommand({
     Document: {
       S3Object: {
         Bucket: bucket,
         Name: key
       }
     }
-  };
+  });
 
-  const response = await textract.detectDocumentText(params).promise();
+  const response = await textract.send(cmd);
 
   const lines = [];
   if (response.Blocks) {
@@ -92,11 +93,10 @@ async function extractTextFromS3(bucket, key) {
       }
     }
   }
-
   return lines.join("\n");
 }
 
-// --------- DynamoDB save ---------
+// -------------- DynamoDB integration -----------------
 
 async function saveCandidateToDynamo(item) {
   const params = {
@@ -109,30 +109,25 @@ async function saveCandidateToDynamo(item) {
     }
   };
 
-  if (item.name) {
-    params.Item.name = { S: item.name };
-  }
-  if (item.email) {
-    params.Item.email = { S: item.email };
-  }
-  if (item.phone) {
-    params.Item.phone = { S: item.phone };
-  }
+  if (item.name) params.Item.name = { S: item.name };
+  if (item.email) params.Item.email = { S: item.email };
+  if (item.phone) params.Item.phone = { S: item.phone };
   if (item.skills && item.skills.length > 0) {
     params.Item.skills = { SS: item.skills };
   }
 
-  await dynamodb.putItem(params).promise();
+  const cmd = new PutItemCommand(params);
+  await dynamodb.send(cmd);
 }
 
-// --------- Lambda handler ---------
+// -------------- Lambda handler -----------------
 
 exports.handler = async (event, context) => {
   console.log("Received event:", JSON.stringify(event, null, 2));
 
   if (!event.Records || event.Records.length === 0) {
     console.log("No records in event");
-    return;
+    return { statusCode: 200, body: "No records" };
   }
 
   for (const record of event.Records) {
@@ -142,11 +137,11 @@ exports.handler = async (event, context) => {
     console.log(`Processing file: s3://${bucket}/${key}`);
 
     try {
-      // 1. Extract text from CV using Textract
+      // 1. Get text from Textract
       const text = await extractTextFromS3(bucket, key);
       console.log("Extracted text length:", text.length);
 
-      // 2. Parse data
+      // 2. Parse info
       const email = extractEmail(text);
       const phone = extractPhone(text);
       const name = extractName(text);
@@ -172,7 +167,7 @@ exports.handler = async (event, context) => {
       console.log(`Saved candidate ${candidateId} to DynamoDB`);
     } catch (err) {
       console.error(`Error processing file s3://${bucket}/${key}`, err);
-      // Continue to next record instead of failing entire batch
+      // Continue to next record
     }
   }
 

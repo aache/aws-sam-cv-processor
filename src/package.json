@@ -1,0 +1,10 @@
+{
+  "name": "aws-sam-cv-processor",
+  "version": "1.0.0",
+  "main": "app.js",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-textract": "^3.700.0",
+    "@aws-sdk/client-dynamodb": "^3.700.0"
+  }
+}
