@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CV parser - S3 → Lambda → Textract → DynamoDB
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60
+    MemorySize: 512
+
+Resources:
+  CVBucket:
+    Type: AWS::S3::Bucket
+
+  CandidatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: candidateId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: candidateId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  ResumeProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref CandidatesTable
+      Policies:
+        # DynamoDB CRUD on this table
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CandidatesTable
+        # Read from the CV bucket
+        - S3ReadPolicy:
+            BucketName: !Ref CVBucket
+        # Textract permissions
+        - Statement:
+            - Effect: Allow
+              Action:
+                - textract:DetectDocumentText
+              Resource: "*"
+      Events:
+        CVUploadEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref CVBucket
+            Events: s3:ObjectCreated:*
+
+Outputs:
+  CVBucketName:
+    Description: S3 bucket for uploading CVs
+    Value: !Ref CVBucket
+
+  CandidatesTableName:
+    Description: DynamoDB table storing parsed candidates
+    Value: !Ref CandidatesTable
+
+  ResumeProcessorFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ResumeProcessorFunction.Arn
