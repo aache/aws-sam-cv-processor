@@ -1,14 +1,16 @@
-// app.js (Node.js 20.x, AWS SDK v3 - CommonJS)
+// app.js - Node.js 20.x, AWS SDK v3 (CommonJS)
 
 const { TextractClient, DetectDocumentTextCommand } = require("@aws-sdk/client-textract");
 const { DynamoDBClient, PutItemCommand } = require("@aws-sdk/client-dynamodb");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { randomUUID } = require("crypto");
 
 const textract = new TextractClient({});
 const dynamodb = new DynamoDBClient({});
+const s3 = new S3Client({});
 const TABLE_NAME = process.env.TABLE_NAME;
 
-// -------------- Helper functions for parsing text -----------------
+// ----------------- Parsing helpers -----------------
 
 function extractEmail(text) {
   const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -16,7 +18,6 @@ function extractEmail(text) {
 }
 
 function extractPhone(text) {
-  // Very simple phone regex; tune for your formats
   const match = text.match(/(\+?\d[\d\s\-]{8,15})/);
   return match ? match[0] : null;
 }
@@ -31,10 +32,8 @@ function extractName(text) {
     const lower = line.toLowerCase();
     if (lower.includes("resume") || lower.includes("curriculum") || lower.includes("vitae")) continue;
     if (line.includes("@")) continue;
-    if (/\d/.test(line)) continue; // skip if contains numbers
-    if (line.split(/\s+/).length <= 5) {
-      return line;
-    }
+    if (/\d/.test(line)) continue;
+    if (line.split(/\s+/).length <= 5) return line;
   }
   return null;
 }
@@ -71,16 +70,24 @@ function extractSkills(text) {
   return Array.from(found).sort();
 }
 
-// -------------- Textract integration -----------------
+// ----------------- S3 + Textract -----------------
+
+async function getObjectBytes(bucket, key) {
+  const cmd = new GetObjectCommand({ Bucket: bucket, Key: key });
+  const res = await s3.send(cmd);
+
+  const chunks = [];
+  for await (const chunk of res.Body) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 
 async function extractTextFromS3(bucket, key) {
+  const bytes = await getObjectBytes(bucket, key);
+
   const cmd = new DetectDocumentTextCommand({
-    Document: {
-      S3Object: {
-        Bucket: bucket,
-        Name: key
-      }
-    }
+    Document: { Bytes: bytes } // Textract reads bytes, not S3 directly
   });
 
   const response = await textract.send(cmd);
@@ -96,7 +103,7 @@ async function extractTextFromS3(bucket, key) {
   return lines.join("\n");
 }
 
-// -------------- DynamoDB integration -----------------
+// ----------------- DynamoDB -----------------
 
 async function saveCandidateToDynamo(item) {
   const params = {
@@ -120,9 +127,9 @@ async function saveCandidateToDynamo(item) {
   await dynamodb.send(cmd);
 }
 
-// -------------- Lambda handler -----------------
+// ----------------- Lambda handler -----------------
 
-exports.handler = async (event, context) => {
+exports.handler = async (event) => {
   console.log("Received event:", JSON.stringify(event, null, 2));
 
   if (!event.Records || event.Records.length === 0) {
@@ -137,11 +144,9 @@ exports.handler = async (event, context) => {
     console.log(`Processing file: s3://${bucket}/${key}`);
 
     try {
-      // 1. Get text from Textract
       const text = await extractTextFromS3(bucket, key);
       console.log("Extracted text length:", text.length);
 
-      // 2. Parse info
       const email = extractEmail(text);
       const phone = extractPhone(text);
       const name = extractName(text);
@@ -160,19 +165,14 @@ exports.handler = async (event, context) => {
         skills
       };
 
-      console.log("Parsed candidate item:", JSON.stringify(item, null, 2));
+      console.log("Parsed candidate:", JSON.stringify(item, null, 2));
 
-      // 3. Save to DynamoDB
       await saveCandidateToDynamo(item);
       console.log(`Saved candidate ${candidateId} to DynamoDB`);
     } catch (err) {
       console.error(`Error processing file s3://${bucket}/${key}`, err);
-      // Continue to next record
     }
   }
 
-  return {
-    statusCode: 200,
-    body: "OK"
-  };
+  return { statusCode: 200, body: "OK" };
 };

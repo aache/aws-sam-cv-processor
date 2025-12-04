@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: CV parser - S3 → Lambda → Textract → DynamoDB
+Description: CV parser - S3 → Lambda → Textract → DynamoDB (Node.js 20, SDK v3)
 
 Globals:
   Function:
@@ -11,9 +11,11 @@ Globals:
 Resources:
   CVBucket:
     Type: AWS::S3::Bucket
-    # (Optionally) you can give it a name:
-    # Properties:
-    #   BucketName: !Sub "${AWS::StackName}-cv-bucket"
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
 
   CandidatesTable:
     Type: AWS::DynamoDB::Table
@@ -38,12 +40,18 @@ Resources:
         # DynamoDB CRUD on this table
         - DynamoDBCrudPolicy:
             TableName: !Ref CandidatesTable
-        # Textract permissions
+
+        # Extra permissions (Textract + S3 GetObject)
         - Statement:
             - Effect: Allow
               Action:
                 - textract:DetectDocumentText
               Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: "arn:aws:s3:::*"   # wide for simplicity, avoids circular dep
+
       Events:
         CVUploadEvent:
           Type: S3
