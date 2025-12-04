@@ -1,16 +1,22 @@
-// app.js - Node.js 20.x, AWS SDK v3 (CommonJS)
+// app.js - Node.js 20.x, AWS SDK v3 (CommonJS), async Textract for PDFs
 
-const { TextractClient, DetectDocumentTextCommand } = require("@aws-sdk/client-textract");
+const {
+  TextractClient,
+  StartDocumentTextDetectionCommand,
+  GetDocumentTextDetectionCommand
+} = require("@aws-sdk/client-textract");
 const { DynamoDBClient, PutItemCommand } = require("@aws-sdk/client-dynamodb");
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { randomUUID } = require("crypto");
 
 const textract = new TextractClient({});
 const dynamodb = new DynamoDBClient({});
-const s3 = new S3Client({});
 const TABLE_NAME = process.env.TABLE_NAME;
 
-// ----------------- Parsing helpers -----------------
+// ------------- small util -------------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ------------- parsing helpers -------------
 
 function extractEmail(text) {
   const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -70,40 +76,76 @@ function extractSkills(text) {
   return Array.from(found).sort();
 }
 
-// ----------------- S3 + Textract -----------------
+// ------------- Textract async on PDF -------------
 
-async function getObjectBytes(bucket, key) {
-  const cmd = new GetObjectCommand({ Bucket: bucket, Key: key });
-  const res = await s3.send(cmd);
-
-  const chunks = [];
-  for await (const chunk of res.Body) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
-async function extractTextFromS3(bucket, key) {
-  const bytes = await getObjectBytes(bucket, key);
-
-  const cmd = new DetectDocumentTextCommand({
-    Document: { Bytes: bytes } // Textract reads bytes, not S3 directly
+async function extractTextFromS3Pdf(bucket, key) {
+  // 1) start async job
+  const startCmd = new StartDocumentTextDetectionCommand({
+    DocumentLocation: {
+      S3Object: { Bucket: bucket, Name: key }
+    }
   });
 
-  const response = await textract.send(cmd);
+  const startRes = await textract.send(startCmd);
+  const jobId = startRes.JobId;
+  console.log("Started Textract JobId:", jobId);
 
-  const lines = [];
-  if (response.Blocks) {
-    for (const block of response.Blocks) {
-      if (block.BlockType === "LINE" && block.Text) {
-        lines.push(block.Text);
+  // 2) poll until SUCCEEDED
+  let jobStatus = "IN_PROGRESS";
+  let pagesText = [];
+  let nextToken = undefined;
+
+  while (jobStatus === "IN_PROGRESS") {
+    await sleep(2000); // 2s delay between polls
+
+    const getCmd = new GetDocumentTextDetectionCommand({
+      JobId: jobId,
+      NextToken: nextToken
+    });
+
+    const getRes = await textract.send(getCmd);
+
+    jobStatus = getRes.JobStatus;
+    console.log("Textract job status:", jobStatus);
+
+    if (jobStatus === "FAILED") {
+      throw new Error(`Textract job failed: ${JSON.stringify(getRes, null, 2)}`);
+    }
+    if (jobStatus === "SUCCEEDED") {
+      // gather all pages (may be paginated by NextToken)
+      let blocks = getRes.Blocks || [];
+      pagesText.push(
+        blocks
+          .filter((b) => b.BlockType === "LINE" && b.Text)
+          .map((b) => b.Text)
+          .join("\n")
+      );
+
+      nextToken = getRes.NextToken;
+      while (nextToken) {
+        const moreCmd = new GetDocumentTextDetectionCommand({
+          JobId: jobId,
+          NextToken: nextToken
+        });
+        const moreRes = await textract.send(moreCmd);
+        blocks = moreRes.Blocks || [];
+        pagesText.push(
+          blocks
+            .filter((b) => b.BlockType === "LINE" && b.Text)
+            .map((b) => b.Text)
+            .join("\n")
+        );
+        nextToken = moreRes.NextToken;
       }
+
+      break;
     }
   }
-  return lines.join("\n");
+
+  return pagesText.join("\n");
 }
 
-// ----------------- DynamoDB -----------------
+// ------------- DynamoDB -------------
 
 async function saveCandidateToDynamo(item) {
   const params = {
@@ -127,7 +169,7 @@ async function saveCandidateToDynamo(item) {
   await dynamodb.send(cmd);
 }
 
-// ----------------- Lambda handler -----------------
+// ------------- Lambda handler -------------
 
 exports.handler = async (event) => {
   console.log("Received event:", JSON.stringify(event, null, 2));
@@ -144,7 +186,8 @@ exports.handler = async (event) => {
     console.log(`Processing file: s3://${bucket}/${key}`);
 
     try {
-      const text = await extractTextFromS3(bucket, key);
+      // For now assume PDFs (your resume). For images you could still use DetectDocumentText.
+      const text = await extractTextFromS3Pdf(bucket, key);
       console.log("Extracted text length:", text.length);
 
       const email = extractEmail(text);
@@ -154,16 +197,7 @@ exports.handler = async (event) => {
 
       const candidateId = randomUUID();
 
-      const item = {
-        candidateId,
-        bucket,
-        fileKey: key,
-        rawText: text,
-        name,
-        email,
-        phone,
-        skills
-      };
+      const item = { candidateId, bucket, fileKey: key, rawText: text, name, email, phone, skills };
 
       console.log("Parsed candidate:", JSON.stringify(item, null, 2));
 

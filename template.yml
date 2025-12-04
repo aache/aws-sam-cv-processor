@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: CV parser - S3 → Lambda → Textract → DynamoDB (Node.js 20, SDK v3)
+Description: CV parser - S3 → Lambda → Textract (async PDF) → DynamoDB
 
 Globals:
   Function:
     Runtime: nodejs20.x
-    Timeout: 60
+    Timeout: 120        # give enough time for Textract async job
     MemorySize: 512
 
 Resources:
@@ -37,21 +37,20 @@ Resources:
         Variables:
           TABLE_NAME: !Ref CandidatesTable
       Policies:
-        # DynamoDB CRUD on this table
         - DynamoDBCrudPolicy:
             TableName: !Ref CandidatesTable
-
-        # Extra permissions (Textract + S3 GetObject)
         - Statement:
+            # Textract async permissions
             - Effect: Allow
               Action:
-                - textract:DetectDocumentText
+                - textract:StartDocumentTextDetection
+                - textract:GetDocumentTextDetection
               Resource: "*"
+            # Lambda must read PDFs if ever needed (not strictly required here)
             - Effect: Allow
               Action:
                 - s3:GetObject
-              Resource: "arn:aws:s3:::*"   # wide for simplicity, avoids circular dep
-
+              Resource: "arn:aws:s3:::*"
       Events:
         CVUploadEvent:
           Type: S3
