@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: CV parser - S3 → Lambda → Textract (async PDF) → DynamoDB
+Description: CV parser - S3 → Lambda → Textract (async PDF) → DynamoDB → DynamoDB Stream → Bedrock role matching
 
 Globals:
   Function:
@@ -27,6 +27,8 @@ Resources:
         - AttributeName: candidateId
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE   # enable DynamoDB Stream with new item image
 
   ResumeProcessorFunction:
     Type: AWS::Serverless::Function
@@ -46,7 +48,7 @@ Resources:
                 - textract:StartDocumentTextDetection
                 - textract:GetDocumentTextDetection
               Resource: "*"
-            # Lambda must read PDFs if ever needed (not strictly required here)
+            # Lambda can read from any S3 bucket (simplifies demo, avoids circular deps)
             - Effect: Allow
               Action:
                 - s3:GetObject
@@ -58,6 +60,38 @@ Resources:
             Bucket: !Ref CVBucket
             Events: s3:ObjectCreated:*
 
+  RoleMatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: roleMatch.handler
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref CandidatesTable
+          ROLE_DESCRIPTION: |
+            Senior Backend Engineer
+            Tech: Java 17, Spring Boot, AWS, Kafka, Microservices
+            Experience: 6–12 years
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CandidatesTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: "*"
+      Events:
+        NewCandidateEvent:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt CandidatesTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 1
+            Enabled: true
+
 Outputs:
   CVBucketName:
     Description: S3 bucket for uploading CVs
@@ -68,5 +102,9 @@ Outputs:
     Value: !Ref CandidatesTable
 
   ResumeProcessorFunctionArn:
-    Description: Lambda function ARN
+    Description: Lambda function ARN (Textract + parsing)
     Value: !GetAtt ResumeProcessorFunction.Arn
+
+  RoleMatchFunctionArn:
+    Description: Lambda function ARN (Bedrock role matching)
+    Value: !GetAtt RoleMatchFunction.Arn
